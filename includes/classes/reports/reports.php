@@ -1,0 +1,1249 @@
+<?php
+
+class reports
+{
+	public static function copy($reports_id)
+	{
+		$reports_list[] = $reports_id;
+		$reports_list = reports::get_parent_reports($reports_id,$reports_list);
+		
+		$reports_list = array_reverse($reports_list);
+		
+		//print_rr($reports_list);
+		//exit();
+		
+		$parent_reports_id = 0;
+		
+		foreach($reports_list as $reports_id)
+		{
+			$reports_query = db_query("select * from app_reports where id='" . filter_var($reports_id,FILTER_SANITIZE_STRING) . "'");
+			if($reports = db_fetch_array($reports_query))
+			{
+				unset($reports['id']);			
+				$reports['name'] = $reports['name'] . ' (' . TEXT_EXT_NAME_COPY . ')';
+				$reports['parent_id'] = $parent_reports_id;
+				
+				db_perform('app_reports', $reports);
+				$new_reports_id = $parent_reports_id = db_insert_id();
+				
+				$filters_query = db_query("select * from app_reports_filters where reports_id='" . filter_var($reports_id,FILTER_SANITIZE_STRING) . "'");
+				while($filters = db_fetch_array($filters_query))
+				{
+					unset($filters['id']);
+					$filters['reports_id'] = $new_reports_id; 
+					
+					db_perform('app_reports_filters', $filters);
+				}
+			}
+		}
+		
+	}
+	
+  public static function get_default_entity_report_id($entity_id,$reports_type)
+  {
+    $reports_info = reports::create_default_entity_report($entity_id, $reports_type);
+    
+    return $reports_info['id'];
+  }
+  
+  
+  public static function create_default_entity_report($entity_id,$reports_type,$path_array=array()) 
+  {
+    global $app_logged_users_id;
+    
+    $where_str = '';
+            
+    //fitler reports by parent item
+    if(count($path_array)>1)
+    {
+      $parent_path_array = explode('-',$path_array[count($path_array)-2]);
+                               
+      $parent_entity_id = $parent_path_array[0];
+      $parent_item_id = $parent_path_array[1];
+      
+      $where_str = " and parent_entity_id='" . filter_var($parent_entity_id,FILTER_SANITIZE_STRING) . "' and parent_item_id='" . filter_var($parent_item_id,FILTER_SANITIZE_STRING) . "'";
+    }
+    else
+    {
+      $parent_entity_id = 0;
+      $parent_item_id = 0;
+    }
+        
+    $reports_info_query = db_query("select * from app_reports where entities_id='" . db_input(filter_var($entity_id,FILTER_SANITIZE_STRING)). "' and reports_type='" . filter_var($reports_type,FILTER_SANITIZE_STRING) . "' and created_by='" . filter_var($app_logged_users_id,FILTER_SANITIZE_STRING) . "' "  . $where_str );
+    if(!$reports_info = db_fetch_array($reports_info_query))
+    {
+      $default_reports_query = db_query("select * from app_reports where entities_id='" . db_input(filter_var($entity_id,FILTER_SANITIZE_STRING)). "' and reports_type='default'");
+      $default_reports = db_fetch_array($default_reports_query);
+    
+      $sql_data = array('name'=>'',
+                       'entities_id'=>$entity_id,
+                       'reports_type'=>$reports_type,                                              
+                       'in_menu'=>0,
+                       'in_dashboard'=>0,
+                       'listing_order_fields'=>(isset($default_reports['listing_order_fields']) ? $default_reports['listing_order_fields'] : ''),
+                       'created_by'=>$app_logged_users_id,
+                       'parent_entity_id' => $parent_entity_id, 
+                       'parent_item_id' => $parent_item_id,
+                       );
+      db_perform('app_reports',$sql_data);
+      
+      $reports_id = db_insert_id();
+      
+      if($default_reports)
+      {	
+	      $filters_query = db_query("select rf.*, f.name from app_reports_filters rf left join app_fields f on rf.fields_id=f.id where rf.reports_id='" . db_input(filter_var($default_reports['id'],FILTER_SANITIZE_STRING)) . "' order by rf.id");
+	      while($v = db_fetch_array($filters_query))
+	      {
+	        $sql_data = array('reports_id'=>$reports_id,
+	                          'fields_id'=>$v['fields_id'],
+	                          'filters_condition'=>$v['filters_condition'],                                              
+	                          'filters_values'=>$v['filters_values'],
+	                          );
+	                                         
+	        db_perform('app_reports_filters',$sql_data);
+	      }
+      }
+      
+      $reports_info_query = db_query("select * from app_reports where id='" . db_input($reports_id). "'");
+      $reports_info = db_fetch_array($reports_info_query);
+    }
+    
+    //check if parent reports was not set
+    if($reports_info['parent_id']==0 and $reports_type!='entity')
+    {
+      reports::auto_create_parent_reports($reports_info['id']);
+      
+      $reports_info = db_find('app_reports',$reports_info['id']);
+    }
+    
+    return $reports_info;
+  }
+  
+  public static function get_parent_reports($reports_id,$paretn_reports = array())
+  {
+    $report_info = db_find('app_reports',filter_var($reports_id,FILTER_SANITIZE_STRING));
+    
+    if($report_info['parent_id']>0)
+    {
+      $paretn_reports[] = filter_var($report_info['parent_id'],FILTER_SANITIZE_STRING);
+      
+      $paretn_reports = reports::get_parent_reports(filter_var($report_info['parent_id'],FILTER_SANITIZE_STRING),$paretn_reports);
+    }
+    
+    return $paretn_reports;
+  }
+  
+  public static function auto_create_parent_reports($reports_id)
+  {
+    global $app_logged_users_id;
+    
+    $report_info = db_find('app_reports',$reports_id);
+    $entity_info = db_find('app_entities',$report_info['entities_id']);
+    
+    if($entity_info['parent_id']>0 and $report_info['parent_id']==0)
+    {
+      $sql_data = array('name'=>'',
+                        'entities_id'=>$entity_info['parent_id'],
+                        'reports_type'=>'parent',                                              
+                        'in_menu'=>0,
+                        'in_dashboard'=>0,
+                        'created_by'=>$app_logged_users_id,
+                        );
+                        
+      db_perform('app_reports',$sql_data);
+      
+      $insert_id = db_insert_id();
+      
+      db_perform('app_reports',array('parent_id'=>$insert_id),'update',"id='" . db_input($reports_id) . "' and created_by='" . $app_logged_users_id . "'");
+      
+      reports::auto_create_parent_reports($insert_id);
+    }
+  }
+  
+  public static function delete_reports_by_item_id($entity_id, $item_id)
+  {
+    $report_info_query = db_query("select * from app_reports where parent_entity_id='" . $entity_id . "' and parent_item_id='" . $item_id . "'");
+    while($report_info = db_fetch_array($report_info_query))
+    {
+      self::delete_reports_by_id($report_info['id']);            
+    }
+  }
+  
+  
+  public static function delete_reports_by_id($reports_id)
+  {        
+    $report_info_query = db_query("select * from app_reports where id='" . db_input(filter_var($reports_id,FILTER_SANITIZE_STRING)). "'");
+    if($report_info = db_fetch_array($report_info_query))
+    {
+       //delete paretn reports
+      self::delete_parent_reports(filter_var($report_info['id'],FILTER_SANITIZE_STRING));
+      
+      db_query("delete from app_reports where id='" . db_input(filter_var($report_info['id'],FILTER_SANITIZE_STRING)) . "'");
+      db_query("delete from app_reports_filters where reports_id='" . db_input(filter_var($report_info['id'],FILTER_SANITIZE_STRING)) . "'");
+      
+      //delete users filters
+      $filters_query = db_query("select * from app_users_filters where reports_id='" .  db_input(filter_var($report_info['id'],FILTER_SANITIZE_STRING)) . "'");
+      while($filters = db_fetch_array($filters_query))
+      {
+        db_query("delete from app_users_filters where id='" . db_input(filter_var($filters['id'],FILTER_SANITIZE_STRING)) . "'");
+        db_query("delete from app_user_filters_values where filters_id='" . db_input(filter_var($filters['id'],FILTER_SANITIZE_STRING)) . "'");
+      }
+    }
+  }
+  
+  public static function delete_reports_by_type($type)
+  {
+      $report_info_query = db_query("select * from app_reports where reports_type='" .filter_var($type,FILTER_SANITIZE_STRING). "'");
+      if($report_info = db_fetch_array($report_info_query))
+      {
+          self::delete_reports_by_id($report_info['id']);
+      }
+  }
+  
+  public static function delete_parent_reports($reports_id)
+  {        
+    $paretn_reports = reports::get_parent_reports(filter_var($reports_id,FILTER_SANITIZE_STRING));
+    
+    if(count($paretn_reports)>0)
+    {
+      foreach($paretn_reports as $id)
+      {
+        db_query("delete from app_reports where id='" . db_input($id) . "'");
+        db_query("delete from app_reports_filters where reports_id='" . db_input($id) . "'");
+      }
+    }
+  }
+  
+  public static function prepare_filters_having_query($sql_query_array)
+  {
+  	$sql_query = '';
+  	
+  	if(count($sql_query_array)>0)
+  	{
+  		$sql_query = ' having (' . implode(' and ',filter_var_array($sql_query_array)) . ')';
+  	} 
+  	
+  	return $sql_query;
+  }
+  
+  public static function add_filters_query($reports_id,$listing_sql_query, $prefix = '', $is_parent_report = false)
+  {	
+  	global $sql_query_having, $app_entities_cache;
+  	
+    $reports_info_query = db_query("select * from app_reports where id='" . db_input(filter_var($reports_id,FILTER_SANITIZE_STRING)). "'");
+    if($reports_info = db_fetch_array($reports_info_query))
+    {     
+    	
+      $sql_query = array();
+      
+      $filters_query = db_query("select rf.*, f.name,f.type from app_reports_filters rf left join app_fields f on rf.fields_id=f.id where rf.reports_id='" . db_input(filter_var($reports_info['id'],FILTER_SANITIZE_STRING)) . "' and is_active=1 order by rf.id");
+      while($filters = db_fetch_array($filters_query))
+      {           	      	
+        if($filters['filters_condition']=='empty_value')
+        {
+        	switch($filters['type'])
+        	{
+        		case 'fieldtype_date_updated':
+        			$sql_query[] = "e.date_updated=0";
+        			break;
+        		case 'fieldtype_date_added':
+        				$sql_query[] = "e.date_added=0";
+        			break;
+  					case 'fieldtype_input_date':
+  					case 'fieldtype_input_datetime':
+        		case 'fieldtype_dropdown':
+        		case 'fieldtype_progress':
+        				$sql_query[] = "field_" . filter_var($filters['fields_id'],FILTER_SANITIZE_STRING) . "=0";
+        			break;
+        		default:
+        				$sql_query[] = "length(field_" . filter_var($filters['fields_id'],FILTER_SANITIZE_STRING) . ")=0";
+        			break;
+        	}          
+        }
+        elseif($filters['filters_condition']=='not_empty_value')
+        {
+        	switch($filters['type'])
+        	{
+        		case 'fieldtype_date_updated':
+        			$sql_query[] = "e.date_updated>0";
+        			break;
+        		case 'fieldtype_date_added':
+        			$sql_query[] = "e.date_added>0"; 
+        			break;
+        		case 'fieldtype_input_date':
+        		case 'fieldtype_input_datetime':
+        		case 'fieldtype_dropdown':
+        			$sql_query[] = "field_" . filter_var($filters['fields_id'],FILTER_SANITIZE_STRING) . ">0";
+        			break;
+        		default:
+        			$sql_query[] = "length(field_" . filter_var($filters['fields_id'],FILTER_SANITIZE_STRING) . ")>0";
+        			break;
+        	}
+        }
+        elseif(in_array($filters['type'],fields_types::get_types_for_search()))
+        {
+        	$sql_query = self::add_search_qeury($filters,filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING), $sql_query);
+        }
+        elseif(strlen($filters['filters_values'])>0)
+        {       
+          $sql_query = fields_types::reports_query(array('class'=>filter_var($filters['type'],FILTER_SANITIZE_STRING),'filters'=>filter_var_array($filters),'entities_id'=>filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING),'sql_query'=>$sql_query,'prefix'=>$prefix));
+        }
+      }
+      
+      //add filters queries
+      if(count($sql_query)>0)
+      {
+        $listing_sql_query .= ' and (' . implode(' and ',$sql_query) .  ')';
+      } 
+            
+      //add having queries for paretn report only
+      if($is_parent_report and isset($sql_query_having[filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING)]))
+      {
+      	$listing_sql_query  .= reports::prepare_filters_having_query($sql_query_having[filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING)]);
+      }
+                        
+      //add filters for parent report if exist
+      if($reports_info['parent_id']>0)
+      {      	      	
+      	$report_info_query = db_query("select entities_id from app_reports where id='" . db_input(filter_var($reports_info['parent_id'],FILTER_SANITIZE_STRING)) . "'");
+      	if($report_info = db_fetch_array($report_info_query))
+      	{              		
+	        /**
+	         * The sql query "(select item_id from (select e.id ..." need to prepare filters by formula fileds with using having
+	         */
+	        $check_query = db_query("select count(*) as total from app_fields where entities_id='" . db_input(filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING)) . "' and type='fieldtype_formula'");
+	        $check = db_fetch_array($check_query);
+	        
+	        if($check['total']>0)
+	        {
+	        	$listing_sql_query .= ' and e.parent_item_id in (select item_id from (select e.id as item_id ' . fieldtype_formula::prepare_query_select(filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING),'') . ' from app_entity_' . filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING). ' e where e.id>0 ' .  items::add_access_query(filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING),'') . ' ' . reports::add_filters_query(filter_var($reports_info['parent_id'],FILTER_SANITIZE_STRING),'','',true)  . ') as parent_entity_' . filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING) . ' )';
+	        }
+	        else
+	        {
+	        	$listing_sql_query .= ' and e.parent_item_id in (select e.id from app_entity_' . filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING). ' e where e.id>0  ' .  items::add_access_query(filter_var($report_info['entities_id'],FILTER_SANITIZE_STRING),'') . ' ' . reports::add_filters_query(filter_var($reports_info['parent_id'],FILTER_SANITIZE_STRING),'')  . ')';        	
+	        }
+      	}
+        
+        
+      }      
+      elseif($app_entities_cache[filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING)]['parent_id']>0 and $reports_info['reports_type']=='default') //check access for report type 'default' where parent_id=0
+      {            	              
+      	$listing_sql_query .= items::add_access_query_for_parent_entities(filter_var($reports_info['entities_id'],FILTER_SANITIZE_STRING));                               
+      }
+      	
+    }
+                           
+    return $listing_sql_query;
+  }
+  
+  public static function add_search_qeury($field, $current_entity_id, $main_sql_query)
+  {
+  	global $search_keywords;
+  	
+  	$filters_values = filter_var($field['filters_values'],FILTER_SANITIZE_STRING);
+  	
+  	//print_rr($field);
+  	  	  
+  	if(app_parse_search_string($filters_values,$search_keywords))
+  	{
+  		  	
+  		$sql_query = array();
+  	
+  		/**
+  		 *  search in fields
+  		 */  		
+  		{
+  			  	
+  			//handle search by ID
+  			if($field['type']=='fieldtype_id')
+  			{
+  				if(is_numeric($search_keywords[0]))
+  					$sql_query[] = "e.id='" . db_input($search_keywords[0]) . "'";
+  			}
+  			//handle search by phone
+  			elseif($field['type']=='fieldtype_phone')
+  			{
+  			    if(strlen(preg_replace('/\D/', '', $filters_values)))
+  				$sql_query[] = "rukovoditel_regex_replace('[^0-9]','',e.field_" . filter_var($field['fields_id'],FILTER_SANITIZE_STRING) . ") like '%" . db_input(preg_replace('/\D/', '', $filters_values)) . "%'";
+  			}
+  			//handle search by entity
+  			elseif($field['type']=='fieldtype_entity')
+  			{
+  				$cfg = new fields_types_cfg($field['configuration']);
+  				if($heading_field_id = fields::get_heading_id(filter_var($cfg->get('entity_id'),FILTER_SANITIZE_STRING)))
+  				{
+  					$where_str = "select es.id from app_entity_" . filter_var($cfg->get('entity_id'),FILTER_SANITIZE_STRING) . " as es where es.id='" . (int)$filters_values . "'";
+  	
+  					$where_str .= " or (";
+  					for ($i=0, $n=sizeof($search_keywords); $i<$n; $i++ )
+  					{
+  						switch ($search_keywords[$i])
+  						{
+  							case '(':
+  							case ')':
+  								$where_str .= " " . $search_keywords[$i] . " ";
+  								break;
+  							case 'and':
+  							case 'or':
+  								$search_type = $search_keywords[$i];
+  								$where_str .= " " . $search_type . " ";
+  								break;
+  							default:
+  								$keyword = $search_keywords[$i];
+  	  								
+  								$where_str .= "es.field_" . $heading_field_id . " like '%" . db_input($keyword) . "%'";  								
+  								break;
+  						}
+  					}
+  					$where_str .= ")";
+  				}
+  				else
+  				{
+  					$where_str = (int)$filters_values;
+  				}
+  				 
+  				$sql_query[] = "(select count(*) from app_entity_" . filter_var($current_entity_id,FILTER_SANITIZE_STRING) . "_values as cv where cv.items_id=e.id and cv.fields_id='" . db_input(filter_var($field['fields_id'],FILTER_SANITIZE_STRING))  . "' and cv.value in (" . $where_str . "))>0" ;
+  			}
+  			elseif (isset($search_keywords) && (sizeof($search_keywords) > 0))
+  			{
+  				$where_str = "(";
+  				for ($i=0, $n=sizeof($search_keywords); $i<$n; $i++ )
+  				{
+  					switch ($search_keywords[$i])
+  					{
+  						case '(':
+  						case ')':
+  							$where_str .= " " . $search_keywords[$i] . " ";
+  							break;
+  						case 'and':
+  						case 'or':  							
+  							$search_type = ($field['filters_condition']=='search_type_match' ? 'and' : $search_keywords[$i]);
+  							$where_str .= " " . $search_type . " ";
+  							break;
+  						default:
+  							$keyword = $search_keywords[$i];
+  	  							  							  									  							
+      					$where_str .= "e.field_" . filter_var($field['fields_id'],FILTER_SANITIZE_STRING) . " like '%" . db_input(filter_var($keyword,FILTER_SANITIZE_STRING)) . "%'";
+      					  							  							
+  							break;
+  					}
+  				}
+  				$where_str .= ")";
+  	
+  				$sql_query[] = $where_str;
+  			}
+  		}
+  	}
+  	
+  	if(count($sql_query)>0)
+  	{
+  		//print_r($sql_query);
+  		 
+  		$main_sql_query[] = implode(' or ', $sql_query);
+  	
+  		//print_r($main_sql_query);
+  	}
+  	
+  	return $main_sql_query;
+  	
+  }
+  
+  public static function add_order_query($reports_order_fields, $entities_id)
+  {
+  	global $app_heading_fields_cache;
+  	
+    $listing_sql_query_join = '';
+    $listing_sql_query = '';
+    $listing_sql_query_from = '';
+    
+    $listing_order_fields_id = array();
+    $listing_order_fields = array();
+    $listing_order_clauses = array();
+    
+    foreach(explode(',',filter_var($reports_order_fields,FILTER_SANITIZE_STRING)) as $key=>$order_field)
+    {
+      if(strlen($order_field)==0) continue; 
+      
+      $order = explode('_',$order_field);
+      
+      $alias = 'fc' . $key;
+      
+      $field_id = filter_var($order[0],FILTER_SANITIZE_STRING);
+      $order_cause =  filter_var($order[1],FILTER_SANITIZE_STRING);
+            
+      //prepare sql for order by last comment date
+      if($field_id=='lastcommentdate')
+      {        
+        $listing_order_fields[] = "(select comments.date_added from app_comments comments where comments.items_id=e.id and comments.entities_id='".db_input(filter_var($entities_id,FILTER_SANITIZE_STRING))."' order by comments.date_added desc limit 1) " . $order_cause;
+        
+        continue;
+      } 
+           
+      //prepare order for fields
+      $field_info_query = db_query("select * from app_fields where id='" . db_input(filter_var((int)$field_id,FILTER_SANITIZE_STRING)) . "'");
+      if($field_info = db_fetch_array($field_info_query))
+      {
+        $listing_order_fields_id[]=$field_id;
+        $listing_order_clauses[$field_id] = $order_cause;
+        $field_cfg = new fields_types_cfg(filter_var($field_info['configuration'],FILTER_SANITIZE_STRING));
+        
+                        
+        if(in_array($field_info['type'],array('fieldtype_created_by','fieldtype_date_added','fieldtype_id','fieldtype_date_updated')))
+        {
+          $listing_order_fields[] = 'e.' . str_replace('fieldtype_','',filter_var($field_info['type'],FILTER_SANITIZE_STRING)) . ' ' . $order_cause;
+        }
+        elseif($field_info['type']=='fieldtype_dropdown_multilevel' and $field_cfg->get('value_displya_own_column'))
+        {
+        	$field_id_array = explode('-',$field_id);
+        	$level = $field_id_array[1];
+        	$field_id  = filter_var((int)$field_id,FILTER_SANITIZE_STRING);
+        	        	
+        	if($level==0)
+        	{
+        		$field_name_to_join .= "SUBSTRING_INDEX(field_" . $field_id . ",','," . ($level+1). ")";
+        	}
+        	else
+        	{
+        		$field_name_to_join = "REPLACE(SUBSTRING_INDEX(REPLACE(field_" . $field_id . ",SUBSTRING_INDEX(field_" . $field_id . ",','," . $level . "),''),','," . ($level+1). "),',','')";        	
+        	}
+        	
+        	if($field_cfg->get('use_global_list')>0)
+        	{
+        		$listing_sql_query_join .= " left join app_global_lists_choices {$alias} on {$alias}.id=" . $field_name_to_join;
+        	}
+        	else
+        	{
+        		$listing_sql_query_join .= " left join app_fields_choices {$alias} on {$alias}.id=" . $field_name_to_join; //field_" . (int)$field_id . "_level_" . $level;
+        	}
+        	
+        	$listing_order_fields[] = "{$alias}.sort_order " . $order_cause . ", {$alias}.name " . $order_cause;        	
+        }
+        elseif(in_array($field_info['type'],array('fieldtype_dropdown','fieldtype_dropdown_multiple','fieldtype_checkboxes','fieldtype_radioboxes','fieldtype_grouped_users','fieldtype_dropdown_multilevel')))
+        {
+          if($field_cfg->get('use_global_list')>0)
+          {
+            $listing_sql_query_join .= " left join app_global_lists_choices {$alias} on {$alias}.id=e.field_" . $field_id;
+          }
+          else
+          {
+            $listing_sql_query_join .= " left join app_fields_choices {$alias} on {$alias}.id=e.field_" . $field_id;            
+          }
+          
+          $listing_order_fields[] = "{$alias}.sort_order " . $order_cause . ", {$alias}.name " . $order_cause;
+        }
+        elseif(in_array($field_info['type'],array('fieldtype_entity','fieldtype_entity_ajax','fieldtype_entity_multilevel')))
+        {
+          $entity_info_query = db_query("select * from app_entities where id='" . filter_var($field_cfg->get('entity_id'),FILTER_SANITIZE_STRING) . "'");
+          if($entity_info = db_fetch_array($entity_info_query))
+          {
+            //if entity is Users then order by firstname/lastname
+            if($entity_info['id']==1)
+            {
+              //$listing_sql_query_join .= " left join app_entity_{$entity_info['id']} {$alias} on {$alias}.id=e.field_" . $field_id;
+              $listing_sql_query_join .= " left join app_entity_".filter_var($entity_info['id'],FILTER_SANITIZE_STRING). $alias . "on" . $alias .".id=e.field_" . $field_id;
+                $listing_order_fields[] = (CFG_APP_DISPLAY_USER_NAME_ORDER=='firstname_lastname' ? "{$alias}.field_7 {$order_cause}, {$alias}.field_8 {$order_cause}" : "{$alias}.field_8 {$order_cause}, {$alias}.field_7 {$order_cause}") ;
+            }       
+            //if exist haeading field then order by heading  
+            elseif($heading_id = fields::get_heading_id(filter_var($entity_info['id'],FILTER_SANITIZE_STRING)))
+            {
+
+            	if($app_heading_fields_cache[$heading_id]['type']=='fieldtype_id')
+            	{            		
+            		$listing_order_fields[] = 'e.field_' . $field_id . ' ' . $order_cause;
+            	}
+              elseif(in_array($app_heading_fields_cache[$heading_id]['type'],array('fieldtype_created_by','fieldtype_date_added','fieldtype_date_updated')))
+        			{
+        				$listing_sql_query_join .= " left join app_entity_".filter_var($entity_info['id'],FILTER_SANITIZE_STRING) . $alias ." on {$alias}.id=e.field_" . $field_id;
+          			$listing_order_fields[] = "{$alias}." . str_replace('fieldtype_','',$app_heading_fields_cache[$heading_id]['type']) . ' ' . $order_cause;
+        			}
+            	else 
+            	{
+              	$listing_sql_query_join .= " left join app_entity".filter_var($entity_info['id'],FILTER_SANITIZE_STRING).$alias." on {$alias}.id=e.field_" . $field_id;
+              	$listing_order_fields[] = "{$alias}.field_{$heading_id} " . $order_cause;
+            	}
+            }
+            //default order by ID
+            else
+            {            	
+              $listing_order_fields[] = 'e.field_' . $field_id . ' ' . $order_cause;
+            }
+          }                    
+        }
+        elseif(in_array($field_info['type'],array(
+        		'fieldtype_input_numeric',
+        		'fieldtype_input_numeric_comments',
+        		'fieldtype_date_added',
+        		'fieldtype_input_date',        		
+        		'fieldtype_input_datetime',        		
+        		'fieldtype_js_formula',        		
+        		'fieldtype_auto_increment',
+        )))
+        {
+          $listing_order_fields[] = '(e.field_' . $field_id . '+0) ' . $order_cause;
+        }
+        elseif(in_array($field_info['type'],array(        		
+        		'fieldtype_formula',
+        		'fieldtype_months_difference',
+        		'fieldtype_years_difference',
+        		'fieldtype_hours_difference',
+        		'fieldtype_days_difference',
+        		'fieldtype_mysql_query',
+                'fieldtype_dynamic_date',
+        )))
+        {
+          $listing_order_fields[] = '(field_' . $field_id . ') ' . $order_cause;
+        }
+        elseif(in_array($field_info['type'],array('fieldtype_parent_item_id')))
+        {
+          $entity_info = db_find('app_entities',$field_info['entities_id']);          
+          if($entity_info['parent_id']>0)
+          {
+            if($heading_id = fields::get_heading_id(filter_var($entity_info['parent_id'],FILTER_SANITIZE_STRING)))
+            {
+              $listing_sql_query_join .= " left join app_entity_".filter_var($entity_info['parent_id'],FILTER_SANITIZE_STRING).$alias." on {$alias}.id=e.parent_item_id";
+              $listing_order_fields[] = "{$alias}.field_{$heading_id} " . $order_cause;                                
+            }
+            else
+            {
+              $listing_order_fields[] = 'e.parent_item_id ' . $order_cause;
+            }
+          } 
+        }
+        elseif(in_array($field_info['type'],array('fieldtype_attachments','fieldtype_input_file')))
+        {
+        	$listing_order_fields[] = 'SUBSTRING(e.field_' . $field_id . ',LOCATE("_",e.field_' . $field_id . ')) ' . $order_cause;
+        }
+        else
+        {
+          $listing_order_fields[] = 'e.field_' . $field_id . ' ' . $order_cause;
+        }
+      }      
+    }
+            
+    if(count($listing_order_fields)>0)
+    {
+      $listing_sql_query .= " order by " . implode(',',$listing_order_fields);
+    }
+    else
+    {
+      $listing_sql_query .= " order by e.id ";
+    }
+    
+    return array('listing_sql_query'        => $listing_sql_query, 
+                 'listing_sql_query_join'   => $listing_sql_query_join,
+                 'listing_order_fields_id'  => $listing_order_fields_id,
+                 'listing_order_fields'     => $listing_order_fields,
+                 'listing_sql_query_from'   => $listing_sql_query_from,	    						
+                 'listing_order_clauses'    => $listing_order_clauses);    
+  }
+  
+  
+  public static function prepare_dates_sql_filters($filters, $prefix = 'e')
+  {  
+  	
+  	if($prefix==false)
+  	{
+  		$prefix = '';
+  	}
+  	else
+  	{
+  		$prefix = (strlen($prefix) ? $prefix . '.': 'e.');
+  	}
+  	
+    if($filters['type']=='fieldtype_date_added')
+    {
+      $field_name = $prefix . 'date_added';
+    }
+    elseif($filters['type']=='fieldtype_date_updated')
+    {
+    	$field_name = $prefix . 'date_updated';
+    }
+    else
+    {
+      $field_name = $prefix . 'field_' . $filters['fields_id']; 
+    }
+    
+		//to fix issue with FROM_UNIXTIME that return -1 hour difference then php		
+    {
+    	//$field_name = $field_name . '+3600';
+    }     
+    
+    $sql = array();
+    
+    $values = explode(',',$filters['filters_values']);
+              
+    switch($filters['filters_condition'])        
+    {
+      case 'filter_by_days':
+          if(strlen($values[0])>0)
+          {                        
+            $sql_or = array();
+            foreach(explode('&',$values[0]) as $v)
+            {            	
+            	$use_function = (strstr($v[0],'-') ? 'DATE_SUB':'DATE_ADD');            	            
+            	$v = str_replace(array('+','-'),'',$v);
+            	
+              $sql_or[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m-%d')=date_format(" . $use_function . "(now(),INTERVAL " . (int)$v . " DAY),'%Y-%m-%d')";                
+            }
+            
+            if(count($sql_or)>0) $sql[] = "(" . implode(' or ', $sql_or) . ")";
+          }
+          else
+          {          
+	          if(strlen($values[1])>0)
+	          {
+	          	$minutes = (strstr($values[1],':') ? ' %H:%i':'');
+	          	
+	            if(strtotime($values[1])<0)
+	            {
+	            	$sql[] = "DATE_FORMAT(DATE_ADD(FROM_UNIXTIME(0),INTERVAL " . $field_name . " SECOND),'%Y-%m-%d{$minutes}')>='" . db_input($values[1])  . "'";
+	            }
+	            else
+	            {	
+	          		$sql[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m-%d{$minutes}')>='" . db_input($values[1])  . "'";
+	            }	            	            
+	          }
+	          
+	          if(strlen($values[2])>0)
+	          {
+	          	$minutes = (strstr($values[2],':') ? ' %H:%i':'');
+	          	
+	          	if(strtotime($values[2])<0)
+	          	{
+	          		$sql[] = "DATE_FORMAT(DATE_ADD(FROM_UNIXTIME(0),INTERVAL " . $field_name . " SECOND),'%Y-%m-%d{$minutes}')<='" . db_input($values[2])  . "'";
+	          	}
+	          	else
+	          	{
+	            	$sql[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m-%d{$minutes}')<='" . db_input($values[2])  . "'";
+	          	}
+	          	
+	          	$sql[] = "{$field_name}>0";
+	          }	          	          
+          }
+        break;
+      case 'filter_by_week':
+      
+            $values = strlen($values[0])>0 ? $values[0] : 0;
+                        
+            switch(CFG_APP_FIRST_DAY_OF_WEEK)
+            {
+              case '0':
+                  $myslq_date_format = '%Y-%V';
+                break;
+              case '1':
+                  $myslq_date_format = '%Y-%v';
+                break;
+            }
+            
+            $sql_or = array();
+            foreach(explode('&',$values) as $v)
+            {      
+            	$use_function = (strstr($v[0],'-') ? 'DATE_SUB':'DATE_ADD');
+            	$v = str_replace(array('+','-'),'',$v);
+            	
+              $sql_or[] = "FROM_UNIXTIME(" . $field_name . ",'" . $myslq_date_format. "')=date_format(" . $use_function. "(now(),INTERVAL " . (int)$v . " WEEK),'" . $myslq_date_format . "')";                                
+            }
+            
+            if(count($sql_or)>0) $sql[] = "(" . implode(' or ', $sql_or) . ")";
+        
+        break;  
+      case 'filter_by_month':
+      
+            $values = strlen($values[0])>0 ? $values[0] : 0;
+                        
+            $sql_or = array();
+            foreach(explode('&',$values) as $v)
+            {  
+            	$use_function = (strstr($v[0],'-') ? 'DATE_SUB':'DATE_ADD');
+            	$v = str_replace(array('+','-'),'',$v);
+            	
+              $sql_or[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m')=date_format(" . $use_function. "(now(),INTERVAL " . (int)$v . " MONTH),'%Y-%m')";                                
+            }
+            
+            if(count($sql_or)>0) $sql[] = "(" . implode(' or ', $sql_or) . ")";
+        
+        break;
+      case 'filter_by_year':
+            $values = strlen($values[0])>0 ? $values[0] : 0;
+                        
+            $sql_or = array();
+            foreach(explode('&',$values) as $v)
+            {    
+            	$use_function = (strstr($v[0],'-') ? 'DATE_SUB':'DATE_ADD');
+            	$v = str_replace(array('+','-'),'',$v);
+            	
+              $sql_or[] = "FROM_UNIXTIME(" . $field_name . ",'%Y')=date_format(" . $use_function. "(now(),INTERVAL " . (int)$v . " YEAR),'%Y')";                                
+            }
+            
+            if(count($sql_or)>0) $sql[] = "(" . implode(' or ', $sql_or) . ")";
+        break;
+      case 'filter_by_overdue':
+            $sql[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m-%d')<date_format(now(),'%Y-%m-%d') and " . str_replace('+3600','',$field_name) . ">0";
+        break;
+      case 'filter_by_overdue_with_time':
+        		$sql[] = "FROM_UNIXTIME(" . $field_name . ",'%Y-%m-%d %H:%i')<date_format(now(),'%Y-%m-%d %H:%i') and " . str_replace('+3600','',$field_name) . ">0";
+        break;
+      
+    }
+            
+    return $sql;
+  }
+  
+  public static function prepare_numeric_sql_filters($filters, $prefix = 'e')
+  {
+    $values = preg_split("/(&|\|)/",$filters['filters_values'],null,PREG_SPLIT_DELIM_CAPTURE);
+           
+    if(strlen($values[0])>0)
+    {
+    	$values[1] = (isset($values[1]) ? $values[1] : '');
+    	
+      if($values[1]=='|')
+      {
+        $values = array_merge(array('','|'),$values);
+      }
+      else
+      {
+        $values = array_merge(array('','&'),$values);
+      }
+    }
+    
+    $sql = array();
+    $sql_and = array();
+    $sql_or = array();
+    
+    if(strlen($prefix)) $prefix .= '.';
+            
+    for($i=1;$i<count($values);$i+=2)
+    {
+    	if(!isset($values[$i+1])) continue;
+    	
+      if(preg_match("/!=|>=|<=|>|</",$values[$i+1],$matches))
+      {        
+        $operator = $matches[0];
+        $value = (float)str_replace($matches[0],'',$values[$i+1]);
+      }
+      elseif(!is_numeric($values[$i+1]))
+      {
+      	$operator = '=';
+      	$value = "'" . substr($values[$i+1],0,100) . "'";
+      }
+      else
+      {
+        $operator = '=';
+        $value = (float)$values[$i+1];
+      }
+                  
+      switch($values[$i])
+      {
+        case '|':
+            $sql_or[] =  $prefix . 'field_' . $filters['fields_id'] . $operator . $value;
+          break;
+        case '&':
+            $sql_and[] = $prefix . 'field_' . $filters['fields_id'] . $operator . $value;
+          break;
+      }
+      
+    }    
+    
+    //print_r($sql_or);
+    //print_r($sql_and);
+    
+    if(count($sql_or)>0) $sql[] = "(" . implode(' or ', $sql_or) . ")";
+    if(count($sql_and)>0) $sql[] = "(" . implode(' and ', $sql_and) . ")";
+    
+    return $sql;
+  }
+  
+  public static function render_filters_dropdown_menu($report_id,$path='',$redirect_to='report',$parent_reports_id=0)
+  {  
+    $url_params = '';
+    
+    if(strlen($path)>0)
+    {
+      $url_params = '&path=' . $path;      
+    }
+    
+    $parent_reports_param = '';
+    if($parent_reports_id>0)
+    {
+      $url_params .= '&parent_reports_id=' . $parent_reports_id;
+      
+      $report_info = db_find('app_reports',$parent_reports_id);          
+    }
+    else
+    {
+      $report_info = db_find('app_reports',$report_id);  
+    }
+    
+    $entity_info = db_find('app_entities',$report_info['entities_id']);
+    
+    
+    
+    $count_filters = 0;
+    $html = '<ul class="dropdown-menu" role="menu">';
+    $html .= '<li>' . link_to_modalbox(TEXT_FILTERS_FOR_ENTITY_SHORT . ': <b>' . $entity_info['name'] . '</b>',url_for('reports/filters_form','reports_id=' . $report_id . '&redirect_to=' . $redirect_to . $url_params )) . '</li>';
+    $html .= '<li class="divider"></li>';
+    
+    $filters_query = db_query("select rf.*, f.name, f.type from app_reports_filters rf, app_fields f  where rf.fields_id=f.id and rf.reports_id='" . db_input(($parent_reports_id>0 ? $parent_reports_id:$report_id)) . "' order by rf.id");
+    while($v = db_fetch_array($filters_query))
+    {
+      
+      $edit_url = url_for('reports/filters_form','id=' . $v['id'] . '&reports_id=' . $report_id . '&redirect_to=' . $redirect_to . $url_params);
+      $delete_url = url_for('reports/filters','action=delete&id=' . $v['id'] . '&reports_id=' . $report_id . '&redirect_to=' . $redirect_to . $url_params);
+      
+      if(in_array($v['filters_condition'],array('empty_value','not_empty_value','filter_by_overdue','filter_by_overdue_with_time')))
+      {
+        $fitlers_values = reports::get_condition_name_by_key($v['filters_condition']);
+      }
+      else
+      {
+        $fitlers_values = reports::render_filters_values($v['fields_id'],$v['filters_values'],'<br>',$v['filters_condition']); 
+      }
+      
+      $html .= '
+        <li class="dropdown-submenu">' . link_to_modalbox(fields_types::get_option($v['type'],'name',$v['name']),$edit_url) . '
+          <ul class="dropdown-menu">
+            <li class="filters-values-content">
+              '  . link_to_modalbox($fitlers_values,$edit_url) . '
+            </li>
+            <li class="divider"></li>
+            <li>
+      				' . link_to('<i class="fa fa-trash-o"></i> ' . TEXT_BUTTON_REMOVE_FILTER,$delete_url). '
+      			</li>
+          </ul>
+        </li>
+      ';
+      
+      $count_filters++;
+    }
+    $html .= '
+      <li class="divider"></li>
+			<li>
+				' . link_to_modalbox('<i class="fa fa-plus-circle"></i> ' . TEXT_BUTTON_ADD_NEW_REPORT_FILTER,url_for('reports/filters_form','reports_id=' . $report_id . '&redirect_to=' . $redirect_to . $url_params )). '
+			</li>
+      ' . ($count_filters>0 ? '      
+      <li>
+				' . link_to('<i class="fa fa-trash-o"></i> ' . TEXT_BUTTON_REMOVE_ALL_FILTERS, url_for('reports/filters','action=delete&id=all&reports_id=' . $report_id . '&redirect_to=' . $redirect_to . $url_params )). '
+			</li>':'') . '
+    </ul>';
+    
+    return $html;
+  
+  }
+  
+  public static function render_filters_values($fields_id,$filters_values, $separator = '<br>',$filters_condition)
+  {
+    global $app_choices_cache, $app_users_cache, $app_global_choices_cache;
+    
+    $field_info = db_find('app_fields',filter_var($fields_id,FILTER_SANITIZE_STRING));
+    
+    $html = '';
+          
+    switch($field_info['type'])
+    {
+    	case 'fieldtype_user_accessgroups':
+	    		$list = array();
+	    		foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $id)
+	    		{	    			
+    				if(strlen($name = access_groups::get_name_by_id($id)))
+    				{
+    					$list[] = filter_var($name,FILTER_SANITIZE_STRING);
+    				}
+	    			
+	    		}
+	    		
+	    		$html = filter_var(implode($separator,$list),FILTER_SANITIZE_STRING);
+    		break;
+    	case 'fieldtype_user_status':
+    			$html = ($filters_values==1 ? TEXT_ACTIVE : TEXT_INACTIVE);
+    		break;
+      case 'fieldtype_parent_item_id':
+                      
+          $entity_info = db_find('app_entities',filter_var($field_info['entities_id'],FILTER_SANITIZE_STRING));
+                    
+          $output = array();
+          foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $item_id)
+          {
+            $items_info_sql = "select e.* from app_entity_" . filter_var($entity_info['parent_id'],FILTER_SANITIZE_STRING) . " e where e.id='" . db_input(filter_var($item_id,FILTER_SANITIZE_STRING)). "'";
+            $items_query = db_query($items_info_sql);            
+            if($item = db_fetch_array($items_query))
+            {                            
+              $output[]  = items::get_heading_field(filter_var($entity_info['parent_id'],FILTER_SANITIZE_STRING),filter_var($item['id'],FILTER_SANITIZE_STRING));
+            }
+          }
+          
+          $html = filter_var(implode($separator,$output),FILTER_SANITIZE_STRING);
+            
+        break;
+      case 'fieldtype_related_records':
+          $html = ($filters_values=='include' ? TEXT_FILTERS_DISPLAY_WITH_RELATED_RECORDS:TEXT_FILTERS_DISPLAY_WITHOUT_RELATED_RECORDS);
+        break;
+      case 'fieldtype_entity_multilevel':
+      case 'fieldtype_entity_ajax':
+      case 'fieldtype_entity':
+            
+        $cfg = fields_types::parse_configuration(filter_var($field_info['configuration'],FILTER_SANITIZE_STRING));
+        
+        $field_heading_id = 0;
+        $fields_query = db_query("select f.* from app_fields f where f.is_heading=1 and  f.entities_id='" . db_input(filter_var($cfg['entity_id'],FILTER_SANITIZE_STRING)) . "'");
+        if($fields = db_fetch_array($fields_query))
+        {
+          $field_heading_id = filter_var($fields['id'],FILTER_SANITIZE_STRING);        
+        }
+        
+        $output = array();
+        foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $item_id)
+        {
+          $items_info_sql = "select e.* from app_entity_" . filter_var($cfg['entity_id'],FILTER_SANITIZE_STRING) . " e where e.id='" . db_input(filter_var($item_id,FILTER_SANITIZE_STRING)). "'";
+          $items_query = db_query($items_info_sql);
+          if($item = db_fetch_array($items_query))
+          {           
+            if($cfg['entity_id']==1)
+            {
+              $output[]  = $app_users_cache[filter_var($item['id'],FILTER_SANITIZE_STRING)]['name'];
+            }
+            elseif($field_heading_id>0)
+            {
+              $output[]  = items::get_heading_field_value($field_heading_id,filter_var_array($item));
+            }
+            else
+            {
+              $output[]  = filter_var($item['id'],FILTER_SANITIZE_STRING);
+            }                                          
+          }
+        } 
+        
+        $html = filter_var(implode($separator,$output),FILTER_SANITIZE_STRING); 
+        break;
+      case 'fieldtype_formula':
+      case 'fieldtype_input_numeric':     
+      case 'fieldtype_input_numeric_comments':
+      case 'fieldtype_years_difference':
+      case 'fieldtype_hours_difference':
+      case 'fieldtype_days_difference':
+      case 'fieldtype_mysql_query':
+      case 'fieldtype_auto_increment':
+          $html = filter_var($filters_values,FILTER_SANITIZE_STRING);        
+        break;
+      case 'fieldtype_access_group':
+      	
+	      	$list = array();
+	      	foreach(explode(',',$filters_values) as $id)
+	      	{
+	      		$list[] = access_groups::get_name_by_id($id);
+	      	}
+	      	
+	      	$html = filter_var(implode($separator,$list),FILTER_SANITIZE_STRING);
+      	break;
+      case 'fieldtype_autostatus':
+      case 'fieldtype_checkboxes':
+      case 'fieldtype_radioboxes':
+      case 'fieldtype_dropdown':
+      case 'fieldtype_dropdown_multiple':
+      case 'fieldtype_dropdown_multilevel':
+      case 'fieldtype_grouped_users':
+      case 'fieldtype_image_map':
+      case 'fieldtype_tags':
+      case 'fieldtype_stages':
+      
+          $cfg = new fields_types_cfg(filter_var($field_info['configuration'],FILTER_SANITIZE_STRING));
+                    
+          
+          $list = array();
+          foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $id)
+          {
+            if($cfg->get('use_global_list')>0)
+            {
+              if(isset($app_global_choices_cache[$id]))
+              {
+                $list[] = $app_global_choices_cache[$id]['name']; 
+              }
+            }
+            else
+            {
+              if(isset($app_choices_cache[$id]))
+              {
+                $list[] = $app_choices_cache[$id]['name']; 
+              }
+            }
+          }
+          
+          $html = filter_var(implode($separator,$list),FILTER_SANITIZE_STRING);
+          
+        break;
+      case 'fieldtype_progress':
+      	$list = array();
+      	foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $v)
+      	{
+      		$list[] = $v . '%';
+      	}
+      	$html = filter_var(implode($separator,$list),FILTER_SANITIZE_STRING);
+      	break;
+      case 'fieldtype_boolean_checkbox':
+      case 'fieldtype_boolean':
+          $html = fieldtype_boolean::get_boolean_value(filter_var_array($field_info),filter_var($filters_values,FILTER_SANITIZE_STRING));
+        break;  
+      case 'fieldtype_date_added':
+      case 'fieldtype_date_updated':
+      case 'fieldtype_input_date':
+      case 'fieldtype_input_datetime':
+      case 'fieldtype_dynamic_date':
+          $values = explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING));
+          
+          if(strlen($values[0])>0)
+          {
+          	if(in_array($filters_condition,array('empty_value','not_empty_value','filter_by_overdue')))
+          	{
+          		$html = '';
+          	}
+          	else
+          	{	
+	          	switch($filters_condition)
+	          	{
+	          		case 'filter_by_days':
+	          				$html = TEXT_FILTER_BY_DAYS;
+	          			break;
+	          		case 'filter_by_week':
+	          				$html = TEXT_FILTER_BY_WEEK;
+	          			break;
+	          		case 'filter_by_month':
+	          				$html = TEXT_FILTER_BY_MONTH;
+	          			break;
+	          		case 'filter_by_year':
+	          				$html = TEXT_FILTER_BY_YEAR;
+	          			break;
+	          	}
+	          	
+	            $html .=  ': ' . filter_var($values[0],FILTER_SANITIZE_STRING);
+          	}
+          }
+          else
+          {                    
+	          if(strlen($values[1])>0)
+	          {
+	          	$value = ($field_info['type']=='fieldtype_input_date' ? format_date(get_date_timestamp(filter_var($values[1],FILTER_SANITIZE_STRING))) : format_date_time(get_date_timestamp(filter_var($values[1],FILTER_SANITIZE_STRING))));
+	            $html =  TEXT_DATE_FROM . ': ' . filter_var($value,FILTER_SANITIZE_STRING) . ' ';
+	          }
+	          
+	          if(strlen($values[2])>0)
+	          {
+	          	$value = ($field_info['type']=='fieldtype_input_date' ? format_date(get_date_timestamp($values[2])) : format_date_time(get_date_timestamp($values[2])));
+	            $html .=  TEXT_DATE_TO . ': ' . filter_var($value,FILTER_SANITIZE_STRING) . ' ';
+	          }
+          }
+          
+          
+        break;  
+      case 'fieldtype_created_by':
+      case 'fieldtype_user_roles':
+      case 'fieldtype_users_approve':
+      case 'fieldtype_users':
+      case 'fieldtype_users_ajax':
+          $list = array();
+          foreach(explode(',',filter_var($filters_values,FILTER_SANITIZE_STRING)) as $id)
+          {
+            if(isset($app_users_cache[$id]))
+            {
+              $list[] = $app_users_cache[$id]['name']; 
+            }
+            
+            if($id=='current_user_id')
+            {
+            	$list[] = TEXT_CURRENT_USER;
+            }
+          }
+          
+          $html = filter_var(implode($separator,$list),FILTER_SANITIZE_STRING);                  
+        break;
+    }
+                
+    return $html;
+  }
+  
+  public static function get_condition_name_by_key($condition)
+  {
+    switch($condition)
+    {
+      case 'include':
+          return TEXT_CONDITION_INCLUDE;
+        break;
+      case 'exclude':
+          return TEXT_CONDITION_EXCLUDE;
+        break;
+      case 'empty_value':
+          return TEXT_CONDITION_EMPTY_VALUE;
+        break;
+      case 'not_empty_value':
+        	return TEXT_CONDITION_NOT_EMPTY_VALUE;
+        break;
+      case 'filter_by_overdue':
+          return TEXT_FILTER_BY_OVERDUE_DATE;
+        break;
+      case 'filter_by_overdue_with_time':
+        	return TEXT_OVERDUE_DATE_WITH_TIME;
+        break;
+      default:
+      	return TEXT_CONDITION_INCLUDE;
+      	break;
+    }
+  }
+  
+  public static function get_count_fixed_columns($reports_id, $has_with_selected=1)
+  {
+    $reports_info_query = db_query("select * from app_reports where id='" . db_input($reports_id) . "'");
+    if($reports_info = db_fetch_array($reports_info_query))
+    {
+      $cfg = entities::get_cfg($reports_info['entities_id']);
+      
+      $number_fixed_field = (int)$cfg['number_fixed_field_in_listing'];
+      $number_fixed_field = ($number_fixed_field>0 ? ($number_fixed_field+$has_with_selected):0);
+      
+      return $number_fixed_field;
+    }    
+  }
+  
+  public static function force_filter_by($filter_by)
+  {
+  	$filter_by = explode(':', filter_var($filter_by,FILTER_SANITIZE_STRING));
+  	
+  	$field_query = db_query("select id, type, entities_id from app_fields where id='" . db_input(filter_var($filter_by[0],FILTER_SANITIZE_STRING)) . "'");
+  	if($field = db_fetch_array($field_query))
+  	{	
+  		switch($field['type'])
+  		{
+  			case 'fieldtype_created_by':
+  				return " and e.created_by='" . filter_var($filter_by[1],FILTER_SANITIZE_STRING) . "'";
+  				break;
+  			case 'fieldtype_parent_item_id':
+  				return " and e.parent_item_id='" . filter_var($filter_by[1],FILTER_SANITIZE_STRING) . "'";
+  				break;
+  			case 'fieldtype_entity_multilevel':
+  			case 'fieldtype_dropdown':
+  			case 'fieldtype_autostatus':
+  			case 'fieldtype_radioboxes':
+  			case 'fieldtype_stages':
+  				return " and e.field_" . filter_var($filter_by[0],FILTER_SANITIZE_STRING) . " = '" . filter_var($filter_by[1],FILTER_SANITIZE_STRING) . "'";
+  				break;
+  			default:  				
+  				return " and (select count(*) from app_entity_" . filter_var($field['entities_id'],FILTER_SANITIZE_STRING) . "_values as cv where cv.items_id=e.id and cv.fields_id='" . db_input(filter_var($field['id'],FILTER_SANITIZE_STRING))  . "' and cv.value in (" . filter_var($filter_by[1],FILTER_SANITIZE_STRING) . "))>0";
+  				break;
+  		}
+  		
+  	}
+  }
+  
+  static function count_filters_by_reports_id($reports_id)
+  {
+      $count_filters = 0;
+      $reports_list = [];
+      $reports_list[] = $reports_id;
+      $reports_list = reports::get_parent_reports($reports_id,$reports_list);
+      
+      foreach($reports_list as $report_id)
+      {
+          $count_filters += db_count('app_reports_filters',$report_id,'reports_id');
+      }
+      
+      return $count_filters;
+  }
+}
